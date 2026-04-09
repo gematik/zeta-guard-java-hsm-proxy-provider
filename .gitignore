@@ -1,0 +1,28 @@
+# Maven build output
+target/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Eclipse
+.classpath
+.project
+.settings/
+
+# VS Code
+.vscode/
+
+# macOS
+.DS_Store
+
+# Local environment overrides (secrets, personal config)
+*.local
+.env
+
+.jenkins
+.githubignore
+.dependencyLicenses
+

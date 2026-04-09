@@ -1,0 +1,262 @@
+spec:
+  inputs:
+    sonar-quality-gate-enabled:
+      description: 'Enables SonarQube Quality Gate verification.'
+      type: boolean
+      default: true
+
+---
+
+# java-hsm-proxy-provider CI/CD Pipeline
+
+include:
+  - component: $CI_SERVER_FQDN/zeta/zeta-ci-cd-components/dependency-check-mvn@v0.4.0
+    inputs:
+      image: "$CI_REGISTRY/zeta/devops/ci-images/maven:3.9-eclipse-temurin-21-zeta-0"
+      cache-key: java-hsm-proxy-provider
+
+stages:
+  - build
+  - test
+  - publish
+  - publish_reports
+
+default:
+  image: $CI_REGISTRY/zeta/devops/ci-images/maven:3.9-eclipse-temurin-21-zeta-0
+  tags: [ zeta ]
+  interruptible: true
+  cache:
+    paths:
+      - .m2/repository
+
+  services:
+    - name: $CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX/docker:25.0.5-dind
+      alias: docker
+      variables:
+        HEALTHCHECK_TCP_PORT: "2376"
+
+  before_script: |
+    printf "Docker login to %s\n" "$CI_REGISTRY"
+    printf "Docker login to %s\n" "$CI_DEPENDENCY_PROXY_SERVER"
+    printf "%s" "$CI_DEPENDENCY_PROXY_PASSWORD" | docker login "$CI_DEPENDENCY_PROXY_SERVER" -u "$CI_DEPENDENCY_PROXY_USER" --password-stdin
+    printf "%s" "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" -u "$CI_REGISTRY_USER" --password-stdin
+
+variables:
+  DOCKER_HOST: tcp://docker:2376
+  DOCKER_TLS_CERTDIR: /certs
+  DOCKER_CERT_PATH: $DOCKER_TLS_CERTDIR/client
+  DOCKER_TLS_VERIFY: "1"
+  TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX: $CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX/
+
+  # See: https://gitlab.com/gitlab-org/gitlab/-/blob/master/lib/gitlab/ci/templates/Maven.gitlab-ci.yml
+  MAVEN_CLI_OPTS: >-
+    --no-transfer-progress
+    --errors
+    --show-version
+    --settings ci_settings.xml
+
+  MAVEN_OPTS: >-
+    -Dstyle.color=always
+    -Djansi.passthrough=true
+    -Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository
+    -Dhttps.protocols=TLSv1.2
+    -Djava.awt.headless=true
+
+workflow:
+  rules:
+    # 1. Always run the MR pipeline when triggered by a merge request event
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    # 2. Skip the branch pipeline if an MR is already open for this branch
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    # 3. Run the branch pipeline on regular pushes (no MR exists yet) and on tags
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: $CI_COMMIT_TAG
+    - when: never
+
+.rules_mr_default:
+  rules:
+    - if: "$CI_PIPELINE_SOURCE == 'merge_request_event'"
+      when: on_success
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: on_success
+    - when: never
+
+.rules_tags:
+  rules:
+    - if: $CI_COMMIT_TAG
+
+# Build & Test
+
+build:
+  stage: build
+  script:
+    - mvn $MAVEN_CLI_OPTS -P coverage verify
+  artifacts:
+    when: always
+    reports:
+      coverage_report:
+        coverage_format: jacoco
+        path: "target/site/jacoco/jacoco.xml"
+      junit:
+        - "target/surefire-reports/*.xml"
+    paths:
+      - "target/site/"
+      - "target/surefire-reports/"
+  coverage: '/Total.*?([0-9]{1,3})%/'
+
+# Integration Test
+
+integration-test:
+  stage: test
+  needs:
+    - job: build
+  variables:
+    HSM_SIM_IMAGE: $CI_REGISTRY/zeta/zeta-guard/ngx_pep/hsm_sim
+    # HSM_SIM_TAG: main
+  script:
+    - mvn $MAVEN_CLI_OPTS -Pit verify
+  rules:
+    - !reference [ .rules_mr_default, rules ]
+  artifacts:
+    when: always
+    reports:
+      junit:
+        - "target/failsafe-reports/*.xml"
+
+# SBOM
+
+sbom:
+  stage: build
+  script:
+    - mvn $MAVEN_CLI_OPTS -P sbom cyclonedx:makeBom
+  artifacts:
+    when: always
+    paths:
+      - "target/bom.xml"
+      - "target/bom.json"
+
+# SonarQube
+
+mvn-sonar:
+  stage: test
+  cache:
+    key: "$CI_COMMIT_REF_SLUG-maven-sonar"
+    paths:
+      - ".m2/repository"
+      - ".sonar/cache"
+  needs:
+    - job: build
+      artifacts: true
+  rules:
+    - if: '$SONAR_HOST_URL && $CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$SONAR_HOST_URL && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$SONAR_HOST_URL && $CI_COMMIT_TAG'
+    - if: '$SONAR_HOST_URL && $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH != $CI_DEFAULT_BRANCH'
+    - when: never
+  script:
+    - >-
+      mvn ${TRACE:+-Dsonar.verbose=true} $MAVEN_CLI_OPTS
+      ${SONAR_QUALITY_GATE_ENABLED:+-Dsonar.qualitygate.wait=$SONAR_QUALITY_GATE_ENABLED}
+      sonar:sonar
+      -Dsonar.links.homepage=${CI_PROJECT_URL}
+      -Dsonar.links.ci=${CI_PROJECT_URL}/-/pipelines
+      -Dsonar.links.issue=${CI_PROJECT_URL}/-/issues
+  variables:
+    SONAR_QUALITY_GATE_ENABLED: $[[ inputs.sonar-quality-gate-enabled ]]
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"
+    GIT_DEPTH: 0
+
+# Dependency Track
+
+publish_to_dependencytrack:
+  stage: publish
+  rules:
+    - if: $CI_COMMIT_TAG
+      variables:
+        VERSION: "$CI_COMMIT_TAG"
+      when: on_success
+    - if: $CI_MERGE_REQUEST_ID
+      variables:
+        VERSION: "MR $CI_MERGE_REQUEST_ID"
+      when: on_success
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      variables:
+        VERSION: "$CI_COMMIT_SHORT_SHA"
+      when: on_success
+    - when: never
+  needs:
+    - job: sbom
+      artifacts: true
+  script:
+    - >-
+      curl -v -X POST ${DEPENDENCYTRACK_URL}
+      -H "Content-Type: multipart/form-data"
+      -H "X-API-Key: ${DEPENDENCYTRACK_TOKEN}"
+      -F "projectName=java-hsm-proxy-provider"
+      -F "projectVersion=${VERSION}"
+      -F "autoCreate=true"
+      -F "bom=@target/bom.json"
+
+# Publish (SNAPSHOT on MR / main)
+
+deploy:
+  stage: publish
+  script: |
+    mvn $MAVEN_CLI_OPTS \
+      -DaltDeploymentRepository=gitlab::$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/maven \
+      -DskipTests \
+      -Dmaven.install.skip=true \
+      -P gitlab \
+      deploy
+  rules:
+    - !reference [ .rules_mr_default, rules ]
+
+# Publish reports
+
+publish_artifacts:
+  stage: publish_reports
+  rules:
+    - if: $CI_COMMIT_TAG
+      variables:
+        COMMIT_MESSAGE: "$CI_COMMIT_TAG"
+      when: on_success
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      variables:
+        COMMIT_MESSAGE: "main $CI_COMMIT_SHORT_SHA"
+      when: on_success
+    - when: never
+  needs:
+    - job: build
+      artifacts: true
+    - job: dependency-check-mvn
+      artifacts: true
+    - job: sbom
+      artifacts: true
+  script:
+    - git clone https://zeta-sdk:${REPORTING_TOKEN}@${CI_SERVER_FQDN}/zeta/reporting.git
+    - mkdir -p ./reporting/zeta-guard/java-hsm-proxy-provider/
+    - find . -path ./reporting -prune -o -name 'jacoco.xml' -exec cp --parents '{}' ./reporting/zeta-guard/java-hsm-proxy-provider/ \;
+    - find . -path ./reporting -prune -o -name 'dependency-check-report.json' -exec cp --parents '{}' ./reporting/zeta-guard/java-hsm-proxy-provider/ \;
+    - find . -path ./reporting -prune -o -name 'bom.json' -exec cp --parents '{}' ./reporting/zeta-guard/java-hsm-proxy-provider/ \;
+    - cd reporting
+    - git config user.email "ci@${CI_SERVER_FQDN}"
+    - git config user.name "ci"
+    - git add .
+    - git commit -m "$COMMIT_MESSAGE"
+    - git push
+
+# Release (on git tag)
+
+release:
+  stage: publish
+  script: |
+    mvn versions:set -DnewVersion=${CI_COMMIT_TAG}
+    mvn $MAVEN_CLI_OPTS \
+      -DaltDeploymentRepository=gitlab::$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/maven \
+      -DskipTests \
+      -Dmaven.install.skip=true \
+      -P gitlab \
+      deploy
+  rules:
+    - !reference [ .rules_tags, rules ]

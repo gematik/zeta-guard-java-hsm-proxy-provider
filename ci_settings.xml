@@ -1,0 +1,72 @@
+<settings xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
+    <servers>
+        <server>
+            <id>azdo-maven-mirror</id>
+            <username>${env.AZDO_MAVEN_USERNAME}</username>
+            <password>${env.AZDO_MAVEN_PAT}</password>
+        </server>
+
+        <server>
+            <id>gitlab</id>
+            <configuration>
+                <httpHeaders>
+                    <property>
+                        <name>Job-Token</name>
+                        <value>${env.CI_JOB_TOKEN}</value>
+                    </property>
+                </httpHeaders>
+            </configuration>
+        </server>
+    </servers>
+
+    <mirrors>
+        <mirror>
+            <id>azdo-maven-mirror</id>
+            <name>Azure Artifacts Mirror</name>
+            <url>${env.AZDO_MAVEN_MIRROR_URL}</url>
+            <mirrorOf>*,!gitlab</mirrorOf>
+        </mirror>
+    </mirrors>
+
+    <profiles>
+        <profile>
+            <id>use-gitlab</id>
+
+            <repositories>
+                <repository>
+                    <id>gitlab</id>
+                    <url>${env.CI_API_V4_URL}/groups/8/-/packages/maven</url>
+                    <releases>
+                        <enabled>true</enabled>
+                        <updatePolicy>never</updatePolicy>
+                    </releases>
+                    <snapshots>
+                        <enabled>true</enabled>
+                        <updatePolicy>always</updatePolicy>
+                    </snapshots>
+                </repository>
+            </repositories>
+
+            <pluginRepositories>
+                <pluginRepository>
+                    <id>gitlab</id>
+                    <url>${env.CI_API_V4_URL}/groups/8/-/packages/maven</url>
+                    <releases>
+                        <enabled>true</enabled>
+                        <updatePolicy>never</updatePolicy>
+                    </releases>
+                    <snapshots>
+                        <enabled>true</enabled>
+                        <updatePolicy>always</updatePolicy>
+                    </snapshots>
+                </pluginRepository>
+            </pluginRepositories>
+        </profile>
+    </profiles>
+
+    <activeProfiles>
+        <activeProfile>use-gitlab</activeProfile>
+    </activeProfiles>
+</settings>

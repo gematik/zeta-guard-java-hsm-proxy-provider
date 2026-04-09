@@ -1,0 +1,10 @@
+name: "java-hsm-proxy-provider-it"
+
+services:
+  hsm-sim:
+    image: ${HSM_SIM_IMAGE:-zeta/zeta-guard/ngx_pep/hsm_sim}:${HSM_SIM_TAG:-main}
+    # --keys-dir points at the CA keys bundled in the image (same source used by the Helm init container).
+    # Without this GetCertificate returns UNAVAILABLE: No CA configured.
+    command: ["--listen", "0.0.0.0:50051", "--keys-dir", "/etc/hsm_sim/keys"]
+    ports:
+      - "50051"

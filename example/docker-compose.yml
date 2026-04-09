@@ -1,0 +1,9 @@
+name: "java-hsm-proxy-provider-example"
+
+services:
+  hsm-sim:
+    image: ${HSM_SIM_IMAGE:-zeta/zeta-guard/ngx_pep/hsm_sim}:${HSM_SIM_TAG:-main}
+    # --keys-dir required for GetCertificate RPC (CA keys bundled in the image)
+    command: ["--listen", "0.0.0.0:50051", "--keys-dir", "/etc/hsm_sim/keys"]
+    ports:
+      - "15051:50051"
