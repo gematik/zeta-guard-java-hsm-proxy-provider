@@ -29,67 +29,114 @@ import java.security.KeyStore
 import java.security.PrivateKey
 import java.security.Security
 import java.security.Signature
+import javax.crypto.Cipher
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 
-// Start hsm_sim first:  docker compose up  (see docker-compose.yml in this directory)
-// Then run:             mvn compile exec:java
-// Custom endpoint:      mvn compile exec:java -Dexec.args="--endpoint host:port"
+// Start hsm_sim first: docker compose up (see docker-compose.yml in this directory)
+// Then run: mvn compile exec:java
+// Custom endpoint: mvn compile exec:java -Dexec.args="--endpoint host:port"
 
 private const val DEFAULT_ENDPOINT = "localhost:15051"
 private const val DEFAULT_KEY_ID = "zeta-guard-keycloak-tls-es256-v1.p256"
+private const val DEFAULT_KEK_ID = "vau-db-kek-v1"
 private const val ALIAS = "demo"
+private const val KEK_ALIAS = "kek"
 
 fun main(args: Array<String>) {
-    val endpoint = args.option("--endpoint") ?: DEFAULT_ENDPOINT
-    val keyId = args.option("--key-id") ?: DEFAULT_KEY_ID
+  val endpoint = args.option("--endpoint") ?: DEFAULT_ENDPOINT
+  val keyId = args.option("--key-id") ?: DEFAULT_KEY_ID
 
-    println("HSM Proxy Provider Example")
-    println("  endpoint : $endpoint")
-    println("  key-id   : $keyId")
-    println()
+  println("HSM Proxy Provider Example")
+  println("  endpoint: $endpoint")
+  println("  key-id  : $keyId")
+  println()
 
-    // 1. Register the provider with the JVM security framework
-    val provider = HsmProxyProvider()
-    Security.addProvider(provider)
-    println("[1] Provider registered: ${provider.name}")
+  // 1. Register the provider with the JVM security framework
+  val config =
+      """
+            hsm.endpoint=$endpoint
+            keys.$ALIAS.key_id=$keyId
+            """.trimIndent()
+  println("config:")
+  println(config)
+  println()
 
-    // 2. Load the KeyStore — the certificate is fetched via GetCertificate RPC,
-    //    no PEM file on disk required
-    val config =
-        """
+  val provider = HsmProxyProvider()
+  Security.addProvider(provider)
+  println("[1] Provider registered: ${provider.name}")
+
+  // 2. Load the KeyStore — the certificate is fetched via GetCertificate RPC,
+  //    no PEM file on disk required
+  val keyStore =
+      KeyStore.getInstance(HsmProxyProvider.KEYSTORE_TYPE).apply {
+        load(config.byteInputStream(), null)
+      }
+  val cert = keyStore.getCertificate(ALIAS)
+  println("[2] Certificate loaded: ${cert.toString().lines().first()}")
+
+  // 3. Sign — delegates to hsm_sim via gRPC; private key never leaves the HSM
+  val payload = "Hello, HSM!".toByteArray()
+  val privateKey = keyStore.getKey(ALIAS, null) as PrivateKey
+
+  val signer = Signature.getInstance(HsmProxyProvider.SIGNATURE_ALGORITHM, provider)
+  signer.initSign(privateKey)
+  signer.update(payload)
+  val signature = signer.sign()
+  println("[3] Signed ${payload.size} bytes → ${signature.size}-byte DER signature")
+
+  // 4. Verify — uses the standard JVM provider with the public key from the certificate
+  val verifier = Signature.getInstance(HsmProxyProvider.SIGNATURE_ALGORITHM)
+  verifier.initVerify(cert)
+  verifier.update(payload)
+  val valid = verifier.verify(signature)
+  println("[4] Signature valid: $valid")
+
+  check(valid) { "Signature verification failed" }
+
+  // ── Encrypt / Decrypt (AES-256-GCM via HSM) ─────────────────────────
+  // 5. Load an AES key from the KeyStore (type=aes, no certificate needed)
+  val kekId = args.option("--kek-id") ?: DEFAULT_KEK_ID
+  val kekConfig =
+      """
         hsm.endpoint=$endpoint
-        keys.$ALIAS.key_id=$keyId
+        keys.$KEK_ALIAS.key_id=$kekId
+        keys.$KEK_ALIAS.type=aes
         """.trimIndent()
+  println("kekConfig:")
+  println(kekConfig)
 
-    val keyStore =
-        KeyStore.getInstance(HsmProxyProvider.KEYSTORE_TYPE).apply {
-            load(config.byteInputStream(), null)
-        }
-    val cert = keyStore.getCertificate(ALIAS)
-    println("[2] Certificate loaded: ${cert.toString().lines().first()}")
+  val kekStore =
+      KeyStore.getInstance(HsmProxyProvider.KEYSTORE_TYPE).apply {
+        load(kekConfig.byteInputStream(), null)
+      }
+  val kek = kekStore.getKey(KEK_ALIAS, null) as SecretKey
+  println("[5] AES key loaded: alias=$KEK_ALIAS, keyId=$kekId, algorithm=${kek.algorithm}")
 
-    // 3. Sign — delegates to hsm_sim via gRPC; private key never leaves the HSM
-    val payload = "Hello, HSM!".toByteArray()
-    val privateKey = keyStore.getKey(ALIAS, null) as PrivateKey
+  // 6. Encrypt — plaintext + optional AAD sent to HSM Proxy; IV generated server-side
+  val plaintext = "Sensitive DEK for database encryption".toByteArray()
+  val aad = "user-42".toByteArray()
 
-    val signer = Signature.getInstance(HsmProxyProvider.SIGNATURE_ALGORITHM, provider)
-    signer.initSign(privateKey)
-    signer.update(payload)
-    val signature = signer.sign()
-    println("[3] Signed ${payload.size} bytes → ${signature.size}-byte DER signature")
+  val encCipher = Cipher.getInstance(HsmProxyProvider.CIPHER_ALGORITHM, provider)
+  encCipher.init(Cipher.ENCRYPT_MODE, kek)
+  encCipher.updateAAD(aad)
+  val ciphertext = encCipher.doFinal(plaintext)
+  val iv = encCipher.iv
+  println("[6] Encrypted: ${plaintext.size} bytes → ${ciphertext.size} bytes (includes 16-byte GCM tag), IV=${iv.size} bytes")
 
-    // 4. Verify — uses the standard JVM provider with the public key from the certificate
-    val verifier = Signature.getInstance(HsmProxyProvider.SIGNATURE_ALGORITHM)
-    verifier.initVerify(cert)
-    verifier.update(payload)
-    val valid = verifier.verify(signature)
-    println("[4] Signature valid: $valid")
+  // 7. Decrypt — pass ciphertext + IV + same AAD back to HSM Proxy
+  val decCipher = Cipher.getInstance(HsmProxyProvider.CIPHER_ALGORITHM, provider)
+  decCipher.init(Cipher.DECRYPT_MODE, kek, GCMParameterSpec(128, iv))
+  decCipher.updateAAD(aad)
+  val decrypted = decCipher.doFinal(ciphertext)
+  println("[7] Decrypted: ${String(decrypted)}")
 
-    check(valid) { "Signature verification failed" }
-    println()
-    println("Success.")
+  check(decrypted.contentEquals(plaintext)) { "Decrypt round-trip failed" }
+  println()
+  println("Success.")
 }
 
 private fun Array<String>.option(name: String): String? {
-    val idx = indexOf(name)
-    return if (idx >= 0 && idx + 1 < size) get(idx + 1) else null
+  val idx = indexOf(name)
+  return if (idx >= 0 && idx + 1 < size) get(idx + 1) else null
 }

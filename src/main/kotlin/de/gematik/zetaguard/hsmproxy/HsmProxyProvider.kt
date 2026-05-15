@@ -24,6 +24,8 @@ find details in the "Readme" file.
 */
 package de.gematik.zetaguard.hsmproxy
 
+import de.gematik.zetaguard.hsmproxy.cipher.HsmAesGcmCipherSpi
+import de.gematik.zetaguard.hsmproxy.keystore.HsmEcPrivateKey
 import de.gematik.zetaguard.hsmproxy.keystore.HsmKeyStoreSpi
 import de.gematik.zetaguard.hsmproxy.signature.HsmEcdsaSignatureSpi
 import java.security.Provider
@@ -31,11 +33,12 @@ import java.security.Provider
 /**
  * Java Security Provider for HSM-backed cryptographic operations.
  *
- * Registers two services:
+ * Registers three services:
  * - `KeyStore.HSMPROXY` — backed by [HsmKeyStoreSpi]: loads key references and certificates from a `.properties` stream; private key operations are
  *   forwarded to the HSM Proxy via gRPC.
  * - `Signature.SHA256withECDSA` — backed by [HsmEcdsaSignatureSpi]: hashes data locally, sends the digest to the HSM Proxy for signing, and converts
  *   the returned IEEE P1363 signature to ASN.1 DER.
+ * - `Cipher.AES/GCM/NoPadding` — backed by [HsmAesGcmCipherSpi]: delegates AES-256-GCM encrypt/decrypt to the HSM Proxy via gRPC.
  *
  * ## Programmatic registration (recommended)
  *
@@ -65,10 +68,24 @@ class HsmProxyProvider : Provider(NAME, "1.0", "gematik HSM Proxy Java Security 
 
     /** Algorithm name for the Signature service registered by this provider. */
     const val SIGNATURE_ALGORITHM = "SHA256withECDSA"
+
+    /** Algorithm name for the Cipher service registered by this provider. */
+    const val CIPHER_ALGORITHM = "AES/GCM/NoPadding"
   }
 
   init {
-    put("KeyStore.$KEYSTORE_TYPE", HsmKeyStoreSpi::class.java.name)
-    put("Signature.$SIGNATURE_ALGORITHM", HsmEcdsaSignatureSpi::class.java.name)
+    putService(
+        object :
+            Service(
+                this,
+                "Signature",
+                "SHA256withECDSA",
+                HsmEcdsaSignatureSpi::class.java.name,
+                /* aliases */ null,
+                /* attrs   */ mapOf("SupportedKeyClasses" to HsmEcPrivateKey::class.java.name),
+            ) {}
+    )
+    putService(object : Service(this, "KeyStore", "HSMPROXY", HsmKeyStoreSpi::class.java.name, null, null) {})
+    putService(object : Service(this, "Cipher", "AES/GCM/NoPadding", HsmAesGcmCipherSpi::class.java.name, null, null) {})
   }
 }

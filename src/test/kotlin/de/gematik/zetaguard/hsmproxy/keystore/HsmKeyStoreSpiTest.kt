@@ -45,6 +45,7 @@ import io.kotest.matchers.nulls.shouldBeNull
 import io.kotest.matchers.nulls.shouldNotBeNull
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeInstanceOf
+import io.mockk.mockk
 import java.io.File
 import java.security.KeyStoreException
 import java.security.cert.X509Certificate
@@ -262,6 +263,102 @@ class HsmKeyStoreSpiTest : FunSpec() {
       key.getEncoded().shouldBeNull()
     }
 
+    test("engineGetKey returned EC key carries curve params from the certificate (P-256)") {
+      val spi = loadSpi(config())
+      val key = spi.engineGetKey("tls-key", null) as HsmEcPrivateKey
+      val params = key.params
+      params.shouldNotBeNull()
+      // P-256 = secp256r1 — 256-bit prime field.
+      params.curve.field.fieldSize shouldBe 256
+      params.cofactor shouldBe 1
+    }
+
+    test("engineGetKey throws KeyStoreException when EC alias is configured with a non-EC certificate") {
+      val (_, rsaCertFile) = TestCertificateFactory.generateSelfSignedRsaCert()
+      try {
+        val spi = loadSpi(config(certPath = rsaCertFile.absolutePath))
+        val ex = shouldThrow<KeyStoreException> { spi.engineGetKey("tls-key", null) }
+        ex.message!! shouldBe "Certificate for alias 'tls-key' is not EC"
+      } finally {
+        rsaCertFile.delete()
+      }
+    }
+
+    // ── engineLoad — AES key type ─────────────────────────────────────────
+
+    test("engineLoad supports AES key type without certificate") {
+      val cfg =
+          """
+          hsm.endpoint=localhost:50051
+          keys.vau-kek.key_id=vau-db-kek-v1
+          keys.vau-kek.type=aes
+          """
+              .trimIndent()
+      val spi = loadSpi(cfg)
+      spi.engineSize() shouldBe 1
+      spi.engineContainsAlias("vau-kek") shouldBe true
+    }
+
+    test("engineGetKey returns HsmSecretKey for AES alias") {
+      val cfg =
+          """
+          hsm.endpoint=localhost:50051
+          keys.vau-kek.key_id=vau-db-kek-v1
+          keys.vau-kek.type=aes
+          """
+              .trimIndent()
+      val spi = loadSpi(cfg)
+      val key = spi.engineGetKey("vau-kek", null)
+      key.shouldBeInstanceOf<HsmSecretKey>()
+      key.keyId shouldBe "vau-db-kek-v1"
+      key.algorithm shouldBe "AES"
+      key.encoded.shouldBeNull()
+    }
+
+    test("engineGetCertificate returns null for AES alias") {
+      val cfg =
+          """
+          hsm.endpoint=localhost:50051
+          keys.vau-kek.key_id=vau-db-kek-v1
+          keys.vau-kek.type=aes
+          """
+              .trimIndent()
+      val spi = loadSpi(cfg)
+      spi.engineGetCertificate("vau-kek").shouldBeNull()
+    }
+
+    test("engineLoad supports mixed EC and AES keys") {
+      val cfg =
+          """
+          hsm.endpoint=localhost:50051
+          keys.tls.key_id=tls-key-v1
+          keys.tls.cert=${certFile.absolutePath}
+          keys.vau-kek.key_id=vau-db-kek-v1
+          keys.vau-kek.type=aes
+          """
+              .trimIndent()
+      val spi = loadSpi(cfg)
+      spi.engineSize() shouldBe 2
+      spi.engineGetKey("tls", null).shouldBeInstanceOf<HsmEcPrivateKey>()
+      spi.engineGetKey("vau-kek", null).shouldBeInstanceOf<HsmSecretKey>()
+    }
+
+    test("engineLoad defaults to EC when type is not specified") {
+      val spi = loadSpi(config())
+      spi.engineGetKey("tls-key", null).shouldBeInstanceOf<HsmEcPrivateKey>()
+    }
+
+    test("engineLoad throws KeyStoreException for unknown type") {
+      val cfg =
+          """
+          hsm.endpoint=localhost:50051
+          keys.bad.key_id=some-key
+          keys.bad.type=rsa
+          """
+              .trimIndent()
+      shouldThrow<KeyStoreException> { loadSpi(cfg) }
+    }
+
     // ── engineGetCertificate ──────────────────────────────────────────────
 
     test("engineGetCertificate returns the loaded X509Certificate") {
@@ -335,7 +432,7 @@ class HsmKeyStoreSpiTest : FunSpec() {
 
     test("engineSetKeyEntry throws UnsupportedOperationException") {
       shouldThrow<UnsupportedOperationException> {
-        loadSpi(config()).engineSetKeyEntry("x", HsmEcPrivateKey("k", loadSpi(config()).grpcClient!!), null, null)
+        loadSpi(config()).engineSetKeyEntry("x", HsmEcPrivateKey("k", mockk(), loadSpi(config()).grpcClient!!), null, null)
       }
     }
 
@@ -345,6 +442,27 @@ class HsmKeyStoreSpiTest : FunSpec() {
 
     test("engineSetCertificateEntry throws UnsupportedOperationException") {
       shouldThrow<UnsupportedOperationException> { loadSpi(config()).engineSetCertificateEntry("x", cert) }
+    }
+
+    test("engineSetKeyEntry (byte[] overload) throws UnsupportedOperationException") {
+      shouldThrow<UnsupportedOperationException> { loadSpi(config()).engineSetKeyEntry("x", ByteArray(32), null) }
+    }
+
+    // ── engineGetCertificateAlias ─────────────────────────────────────────
+
+    test("engineGetCertificateAlias returns alias for known certificate") {
+      val spi = loadSpi(config(alias = "tls-key"))
+      spi.engineGetCertificateAlias(cert) shouldBe "tls-key"
+    }
+
+    test("engineGetCertificateAlias returns null for unknown certificate") {
+      val (otherCert, otherFile) = TestCertificateFactory.generateSelfSignedEcCert()
+      try {
+        val spi = loadSpi(config())
+        spi.engineGetCertificateAlias(otherCert).shouldBeNull()
+      } finally {
+        otherFile.delete()
+      }
     }
   }
 }

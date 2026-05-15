@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<suppressions xmlns="https://jeremylong.github.io/DependencyCheck/dependency-suppression.1.3.xsd">
+    <!-- See https://dependency-check.github.io/DependencyCheck/general/suppression.html -->
+    <suppress>
+        <notes>
+            Betroffen ist google.protobuf.json_format.ParseDict() in Python.
+            Da in diesem Projekt Java/Kotlin verwendet wird, ist dieses nicht von der Schwachstelle betroffen.
+        </notes>
+        <gav>com.google.protobuf:protobuf-java:3.25.9</gav>
+        <cve>CVE-2026-0994</cve>
+    </suppress>
+</suppressions>

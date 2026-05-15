@@ -25,7 +25,11 @@ find details in the "Readme" file.
 package de.gematik.zetaguard.hsmproxy.grpc
 
 import com.google.protobuf.ByteString
+import de.gematik.zetaguard.hsmproxy.v1.DecryptRequest
+import de.gematik.zetaguard.hsmproxy.v1.DecryptResponse
 import de.gematik.zetaguard.hsmproxy.v1.DigestAlgorithm
+import de.gematik.zetaguard.hsmproxy.v1.EncryptRequest
+import de.gematik.zetaguard.hsmproxy.v1.EncryptResponse
 import de.gematik.zetaguard.hsmproxy.v1.GetCertificateRequest
 import de.gematik.zetaguard.hsmproxy.v1.GetCertificateResponse
 import de.gematik.zetaguard.hsmproxy.v1.GetPublicKeyRequest
@@ -34,6 +38,7 @@ import de.gematik.zetaguard.hsmproxy.v1.HealthCheckRequest
 import de.gematik.zetaguard.hsmproxy.v1.HealthCheckResponse
 import de.gematik.zetaguard.hsmproxy.v1.HsmProxyServiceGrpc
 import de.gematik.zetaguard.hsmproxy.v1.SignRequest
+import de.gematik.zetaguard.hsmproxy.v1.SymmetricEncryptionAlgorithm
 import io.grpc.ManagedChannel
 import io.grpc.ManagedChannelBuilder
 import java.io.Closeable
@@ -112,6 +117,61 @@ class HsmProxyGrpcClient internal constructor(private val channel: ManagedChanne
     log.debug("getCertificate: keyId={}", keyId)
     val request = GetCertificateRequest.newBuilder().setKeyId(keyId).build()
     return stub.withDeadlineAfter(DEFAULT_DEADLINE_SECONDS, TimeUnit.SECONDS).getCertificate(request)
+  }
+
+  /**
+   * Encrypts [plaintext] with AES-256-GCM using the key identified by [keyId].
+   *
+   * The IV/nonce is generated server-side and returned in the response. The caller must store the IV alongside the ciphertext for decryption.
+   *
+   * @param keyId the symmetric key identifier in the HSM (e.g. `"vau-db-kek-v1"`)
+   * @param plaintext the data to encrypt (e.g. a 32-byte DEK)
+   * @param associatedData optional AAD for authenticated encryption (e.g. row ID to prevent ciphertext swapping)
+   * @return the [EncryptResponse] containing ciphertext, IV, and authentication tag
+   * @throws io.grpc.StatusRuntimeException on any gRPC-level error.
+   */
+  fun encrypt(keyId: String, plaintext: ByteArray, associatedData: ByteArray = ByteArray(0)): EncryptResponse {
+    log.debug("encrypt: keyId={} plaintextLen={} aadLen={}", keyId, plaintext.size, associatedData.size)
+    val request =
+        EncryptRequest.newBuilder()
+            .setKeyId(keyId)
+            .setPlaintext(ByteString.copyFrom(plaintext))
+            .setAlgorithm(SymmetricEncryptionAlgorithm.AES_256_GCM)
+            .setAssociatedData(ByteString.copyFrom(associatedData))
+            .build()
+    val response = stub.withDeadlineAfter(DEFAULT_DEADLINE_SECONDS, TimeUnit.SECONDS).encrypt(request)
+    log.debug("encrypt: keyId={} ciphertextLen={} ivLen={}", keyId, response.ciphertext.size(), response.iv.size())
+    return response
+  }
+
+  /**
+   * Decrypts [ciphertext] with AES-256-GCM using the key identified by [keyId].
+   *
+   * The [iv] and [tag] must be the values returned by a previous [encrypt] call. The [associatedData] must match exactly what was passed during
+   * encryption.
+   *
+   * @param keyId the symmetric key identifier in the HSM
+   * @param ciphertext the encrypted data
+   * @param iv the initialization vector from the encrypt response
+   * @param tag the authentication tag from the encrypt response
+   * @param associatedData the AAD used during encryption (must match exactly)
+   * @return the [DecryptResponse] containing the decrypted plaintext
+   * @throws io.grpc.StatusRuntimeException on any gRPC-level error (including authentication failure).
+   */
+  fun decrypt(keyId: String, ciphertext: ByteArray, iv: ByteArray, tag: ByteArray, associatedData: ByteArray = ByteArray(0)): DecryptResponse {
+    log.debug("decrypt: keyId={} ciphertextLen={} ivLen={} tagLen={} aadLen={}", keyId, ciphertext.size, iv.size, tag.size, associatedData.size)
+    val request =
+        DecryptRequest.newBuilder()
+            .setKeyId(keyId)
+            .setCiphertext(ByteString.copyFrom(ciphertext))
+            .setAlgorithm(SymmetricEncryptionAlgorithm.AES_256_GCM)
+            .setIv(ByteString.copyFrom(iv))
+            .setTag(ByteString.copyFrom(tag))
+            .setAssociatedData(ByteString.copyFrom(associatedData))
+            .build()
+    val response = stub.withDeadlineAfter(DEFAULT_DEADLINE_SECONDS, TimeUnit.SECONDS).decrypt(request)
+    log.debug("decrypt: keyId={} plaintextLen={}", keyId, response.plaintext.size())
+    return response
   }
 
   /**

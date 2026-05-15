@@ -73,6 +73,36 @@ object TestCertificateFactory {
     return cert to file
   }
 
+  /**
+   * Generates a self-signed RSA-2048 certificate valid for 1 year — used to exercise the "certificate is not EC" error path in [HsmKeyStoreSpi].
+   *
+   * @return Pair of the [X509Certificate] and the temp [File] containing the PEM. Caller is responsible for deleting the file after use.
+   */
+  fun generateSelfSignedRsaCert(): Pair<X509Certificate, File> {
+    val keyPair = KeyPairGenerator.getInstance("RSA").also { it.initialize(2048) }.generateKeyPair()
+
+    val now = Date()
+    val expiry = Date(now.time + 365L * 24 * 3_600 * 1_000)
+    val subject = X500Name("CN=hsm-test-rsa,O=gematik,C=DE")
+
+    val certHolder =
+        JcaX509v3CertificateBuilder(subject, BigInteger.ONE, now, expiry, subject, keyPair.public)
+            .build(JcaContentSignerBuilder("SHA256withRSA").build(keyPair.private))
+
+    val cert = JcaX509CertificateConverter().getCertificate(certHolder)
+
+    val pem = buildString {
+      appendLine("-----BEGIN CERTIFICATE-----")
+      append(Base64.getMimeEncoder(64, "\n".toByteArray()).encodeToString(cert.encoded))
+      appendLine()
+      appendLine("-----END CERTIFICATE-----")
+    }
+
+    val file = File.createTempFile("hsm-test-cert-rsa-", ".pem").also { it.writeText(pem) }
+
+    return cert to file
+  }
+
   /** Encodes an [X509Certificate] as a PEM string. */
   fun toPem(cert: X509Certificate): String = buildString {
     appendLine("-----BEGIN CERTIFICATE-----")

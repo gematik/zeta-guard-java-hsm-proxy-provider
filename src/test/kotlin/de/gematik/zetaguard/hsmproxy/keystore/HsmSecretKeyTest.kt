@@ -29,36 +29,32 @@ import io.grpc.inprocess.InProcessChannelBuilder
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeInstanceOf
-import io.mockk.mockk
-import java.security.PrivateKey
+import javax.crypto.SecretKey
 
-class HsmEcPrivateKeyTest :
+class HsmSecretKeyTest :
     FunSpec({
-      // Use an in-process channel so no real connection is needed
-      val channel = InProcessChannelBuilder.forName("hsm-ec-key-test").directExecutor().build()
+      val channel = InProcessChannelBuilder.forName("hsm-secret-key-test").directExecutor().build()
       val client = HsmProxyGrpcClient(channel)
 
       afterSpec { client.close() }
 
-      test("getAlgorithm returns EC") { HsmEcPrivateKey("any-key-id", mockk(), client).getAlgorithm() shouldBe "EC" }
+      test("getAlgorithm returns AES") { HsmSecretKey("any-key-id", client).algorithm shouldBe "AES" }
 
-      test("getEncoded returns null — no key material stored locally") { HsmEcPrivateKey("any-key-id", mockk(), client).getEncoded() shouldBe null }
+      test("getEncoded returns null — no key material stored locally") { HsmSecretKey("any-key-id", client).encoded shouldBe null }
 
-      test("getFormat returns PKCS#8 — required by JDK KeyStore internals") {
-        HsmEcPrivateKey("any-key-id", mockk(), client).getFormat() shouldBe "PKCS#8"
-      }
+      test("getFormat returns null — no encoding format without key material") { HsmSecretKey("any-key-id", client).format shouldBe null }
 
       test("keyId is stored and accessible") {
-        val key = HsmEcPrivateKey("zeta-guard-keycloak-tls-es256-v1", mockk(), client)
-        key.keyId shouldBe "zeta-guard-keycloak-tls-es256-v1"
+        val key = HsmSecretKey("vau-db-kek-v1", client)
+        key.keyId shouldBe "vau-db-kek-v1"
       }
 
-      test("implements PrivateKey interface") { HsmEcPrivateKey("k", mockk(), client).shouldBeInstanceOf<PrivateKey>() }
+      test("implements SecretKey interface") { HsmSecretKey("k", client).shouldBeInstanceOf<SecretKey>() }
 
       test("different key IDs produce independent instances") {
-        val key1 = HsmEcPrivateKey("key-a", mockk(), client)
-        val key2 = HsmEcPrivateKey("key-b", mockk(), client)
-        key1.keyId shouldBe "key-a"
-        key2.keyId shouldBe "key-b"
+        val k1 = HsmSecretKey("kek-a", client)
+        val k2 = HsmSecretKey("kek-b", client)
+        k1.keyId shouldBe "kek-a"
+        k2.keyId shouldBe "kek-b"
       }
     })

@@ -28,7 +28,7 @@
         <dependency>
             <groupId>de.gematik.zeta.zeta-guard</groupId>
             <artifactId>java-hsm-proxy-provider</artifactId>
-            <version>0.1.1-SNAPSHOT</version>
+            <version>1.0.0</version>
         </dependency>
 
         <dependency>
