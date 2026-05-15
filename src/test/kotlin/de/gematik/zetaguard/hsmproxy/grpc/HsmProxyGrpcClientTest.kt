@@ -25,7 +25,11 @@ find details in the "Readme" file.
 package de.gematik.zetaguard.hsmproxy.grpc
 
 import com.google.protobuf.ByteString
+import de.gematik.zetaguard.hsmproxy.v1.DecryptRequest
+import de.gematik.zetaguard.hsmproxy.v1.DecryptResponse
 import de.gematik.zetaguard.hsmproxy.v1.DigestAlgorithm
+import de.gematik.zetaguard.hsmproxy.v1.EncryptRequest
+import de.gematik.zetaguard.hsmproxy.v1.EncryptResponse
 import de.gematik.zetaguard.hsmproxy.v1.GetCertificateRequest
 import de.gematik.zetaguard.hsmproxy.v1.GetCertificateResponse
 import de.gematik.zetaguard.hsmproxy.v1.GetPublicKeyRequest
@@ -35,6 +39,7 @@ import de.gematik.zetaguard.hsmproxy.v1.HealthCheckResponse
 import de.gematik.zetaguard.hsmproxy.v1.HsmProxyServiceGrpc
 import de.gematik.zetaguard.hsmproxy.v1.SignRequest
 import de.gematik.zetaguard.hsmproxy.v1.SignResponse
+import de.gematik.zetaguard.hsmproxy.v1.SymmetricEncryptionAlgorithm
 import io.grpc.Server
 import io.grpc.Status
 import io.grpc.StatusRuntimeException
@@ -208,6 +213,88 @@ class HsmProxyGrpcClientTest : FunSpec() {
 
       ex.status.code shouldBe Status.Code.UNAVAILABLE
     }
+
+    // ── encrypt ──────────────────────────────────────────────────────────
+
+    test("encrypt returns ciphertext, IV, and tag from proxy") {
+      val ct = ByteArray(32) { it.toByte() }
+      val iv = ByteArray(12) { (it + 100).toByte() }
+      val tag = ByteArray(16) { (it + 200).toByte() }
+      mockService.encryptResponse =
+          EncryptResponse.newBuilder().setCiphertext(ByteString.copyFrom(ct)).setIv(ByteString.copyFrom(iv)).setTag(ByteString.copyFrom(tag)).build()
+
+      val result = client.encrypt("kek-v1", "hello".toByteArray())
+
+      result.ciphertext.toByteArray() shouldBe ct
+      result.iv.toByteArray() shouldBe iv
+      result.tag.toByteArray() shouldBe tag
+    }
+
+    test("encrypt sends key_id, plaintext, algorithm, and AAD to proxy") {
+      mockService.encryptResponse = EncryptResponse.getDefaultInstance()
+      val plaintext = "secret-dek".toByteArray()
+      val aad = "row-42".toByteArray()
+
+      client.encrypt("kek-v1", plaintext, aad)
+
+      mockService.lastEncryptRequest!!.keyId shouldBe "kek-v1"
+      mockService.lastEncryptRequest!!.plaintext.toByteArray() shouldBe plaintext
+      mockService.lastEncryptRequest!!.algorithm shouldBe SymmetricEncryptionAlgorithm.AES_256_GCM
+      mockService.lastEncryptRequest!!.associatedData.toByteArray() shouldBe aad
+    }
+
+    test("encrypt sends empty AAD when not specified") {
+      mockService.encryptResponse = EncryptResponse.getDefaultInstance()
+
+      client.encrypt("kek-v1", "data".toByteArray())
+
+      mockService.lastEncryptRequest!!.associatedData.toByteArray() shouldBe ByteArray(0)
+    }
+
+    test("encrypt propagates gRPC NOT_FOUND as StatusRuntimeException") {
+      mockService.encryptError = Status.NOT_FOUND.withDescription("key 'unknown' not found").asRuntimeException()
+
+      val ex = shouldThrow<StatusRuntimeException> { client.encrypt("unknown", ByteArray(32)) }
+
+      ex.status.code shouldBe Status.Code.NOT_FOUND
+    }
+
+    // ── decrypt ──────────────────────────────────────────────────────────
+
+    test("decrypt returns plaintext from proxy") {
+      val expected = "decrypted-dek".toByteArray()
+      mockService.decryptResponse = DecryptResponse.newBuilder().setPlaintext(ByteString.copyFrom(expected)).build()
+
+      val result = client.decrypt("kek-v1", ByteArray(32), ByteArray(12), ByteArray(16))
+
+      result.plaintext.toByteArray() shouldBe expected
+    }
+
+    test("decrypt sends all fields to proxy") {
+      mockService.decryptResponse = DecryptResponse.getDefaultInstance()
+      val ct = ByteArray(32) { it.toByte() }
+      val iv = ByteArray(12) { (it + 1).toByte() }
+      val tag = ByteArray(16) { (it + 2).toByte() }
+      val aad = "row-99".toByteArray()
+
+      client.decrypt("kek-v1", ct, iv, tag, aad)
+
+      mockService.lastDecryptRequest!!.keyId shouldBe "kek-v1"
+      mockService.lastDecryptRequest!!.ciphertext.toByteArray() shouldBe ct
+      mockService.lastDecryptRequest!!.iv.toByteArray() shouldBe iv
+      mockService.lastDecryptRequest!!.tag.toByteArray() shouldBe tag
+      mockService.lastDecryptRequest!!.algorithm shouldBe SymmetricEncryptionAlgorithm.AES_256_GCM
+      mockService.lastDecryptRequest!!.associatedData.toByteArray() shouldBe aad
+    }
+
+    test("decrypt propagates gRPC INVALID_ARGUMENT on tampered ciphertext") {
+      mockService.decryptError = Status.INVALID_ARGUMENT.withDescription("GCM authentication failed").asRuntimeException()
+
+      val ex = shouldThrow<StatusRuntimeException> { client.decrypt("kek-v1", ByteArray(32), ByteArray(12), ByteArray(16)) }
+
+      ex.status.code shouldBe Status.Code.INVALID_ARGUMENT
+      ex.status.description shouldContain "authentication failed"
+    }
   }
 }
 
@@ -231,6 +318,14 @@ private class FakeHsmProxyService : HsmProxyServiceGrpc.HsmProxyServiceImplBase(
   var certificateResponse: GetCertificateResponse? = null
   var certificateError: StatusRuntimeException? = null
   var lastCertificateRequest: GetCertificateRequest? = null
+
+  var encryptResponse: EncryptResponse? = null
+  var encryptError: StatusRuntimeException? = null
+  var lastEncryptRequest: EncryptRequest? = null
+
+  var decryptResponse: DecryptResponse? = null
+  var decryptError: StatusRuntimeException? = null
+  var lastDecryptRequest: DecryptRequest? = null
 
   var healthResponse: HealthCheckResponse? = null
   var healthError: StatusRuntimeException? = null
@@ -262,6 +357,26 @@ private class FakeHsmProxyService : HsmProxyServiceGrpc.HsmProxyServiceImplBase(
       return
     }
     responseObserver.onNext(certificateResponse ?: GetCertificateResponse.getDefaultInstance())
+    responseObserver.onCompleted()
+  }
+
+  override fun encrypt(request: EncryptRequest, responseObserver: StreamObserver<EncryptResponse>) {
+    lastEncryptRequest = request
+    encryptError?.let {
+      responseObserver.onError(it)
+      return
+    }
+    responseObserver.onNext(encryptResponse ?: EncryptResponse.getDefaultInstance())
+    responseObserver.onCompleted()
+  }
+
+  override fun decrypt(request: DecryptRequest, responseObserver: StreamObserver<DecryptResponse>) {
+    lastDecryptRequest = request
+    decryptError?.let {
+      responseObserver.onError(it)
+      return
+    }
+    responseObserver.onNext(decryptResponse ?: DecryptResponse.getDefaultInstance())
     responseObserver.onCompleted()
   }
 

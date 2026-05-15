@@ -45,6 +45,7 @@ import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
+import io.mockk.mockk
 import java.security.InvalidKeyException
 import java.security.MessageDigest
 import java.security.Signature
@@ -63,7 +64,7 @@ class HsmEcdsaSignatureSpiTest : FunSpec() {
       server = InProcessServerBuilder.forName(serverName).directExecutor().addService(fakeService).build().start()
       val channel = InProcessChannelBuilder.forName(serverName).directExecutor().build()
       client = HsmProxyGrpcClient(channel)
-      hsmKey = HsmEcPrivateKey("test-key-id", client)
+      hsmKey = HsmEcPrivateKey("test-key-id", mockk(), client)
     }
 
     afterSpec {
@@ -91,11 +92,23 @@ class HsmEcdsaSignatureSpiTest : FunSpec() {
       shouldThrow<InvalidKeyException> { sig.initSign(otherKey) }
     }
 
-    // ── initVerify ────────────────────────────────────────────────────────
+    // ── initVerify / verify / parameter API ───────────────────────────────
 
     test("initVerify throws UnsupportedOperationException") {
       val sig = Signature.getInstance("SHA256withECDSA", provider)
       shouldThrow<UnsupportedOperationException> { sig.initVerify(null as java.security.PublicKey?) }
+    }
+
+    test("engineVerify throws UnsupportedOperationException") {
+      shouldThrow<UnsupportedOperationException> { invokeProtected(HsmEcdsaSignatureSpi(), "engineVerify", ByteArray(64)) }
+    }
+
+    test("engineSetParameter throws UnsupportedOperationException") {
+      shouldThrow<UnsupportedOperationException> { invokeProtected(HsmEcdsaSignatureSpi(), "engineSetParameter", "x", 1) }
+    }
+
+    test("engineGetParameter throws UnsupportedOperationException") {
+      shouldThrow<UnsupportedOperationException> { invokeProtected(HsmEcdsaSignatureSpi(), "engineGetParameter", "x") }
     }
 
     // ── sign ──────────────────────────────────────────────────────────────
@@ -121,7 +134,7 @@ class HsmEcdsaSignatureSpiTest : FunSpec() {
 
     test("sign sends key_id to proxy") {
       fakeService.nextSignature = ByteArray(64)
-      val keyWithId = HsmEcPrivateKey("my-special-key", client)
+      val keyWithId = HsmEcPrivateKey("my-special-key", mockk(), client)
 
       val sig = Signature.getInstance("SHA256withECDSA", provider)
       sig.initSign(keyWithId)
@@ -234,6 +247,20 @@ class HsmEcdsaSignatureSpiTest : FunSpec() {
       (der[0].toInt() and 0xFF) shouldBe 0x30 // SEQUENCE tag
       (der[2].toInt() and 0xFF) shouldBe 0x02 // first INTEGER tag
     }
+  }
+}
+
+/**
+ * Invokes a protected method on [target] by name, unwrapping any [java.lang.reflect.InvocationTargetException]. Used to test SPI methods that JCA
+ * guards behind state checks (e.g. `Signature.verify` short-circuits on un-initialised state before reaching `engineVerify`).
+ */
+private fun invokeProtected(target: Any, methodName: String, vararg args: Any?): Any? {
+  val method = target.javaClass.declaredMethods.first { it.name == methodName && it.parameterCount == args.size }
+  method.isAccessible = true
+  return try {
+    method.invoke(target, *args)
+  } catch (e: java.lang.reflect.InvocationTargetException) {
+    throw e.cause ?: e
   }
 }
 

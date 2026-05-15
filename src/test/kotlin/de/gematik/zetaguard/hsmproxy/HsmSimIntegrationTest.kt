@@ -26,6 +26,7 @@ package de.gematik.zetaguard.hsmproxy
 
 import de.gematik.zetaguard.hsmproxy.grpc.HsmProxyGrpcClient
 import de.gematik.zetaguard.hsmproxy.v1.HealthCheckResponse
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.annotation.Tags
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
@@ -37,9 +38,15 @@ import java.security.Security
 import java.security.Signature
 import java.security.spec.X509EncodedKeySpec
 import java.util.Base64
+import javax.crypto.Cipher
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 
 /** key_id must end with .p256 — hsm_sim derives the EC key via HKDF using this suffix */
 private const val KEY_ID = "zeta-guard-keycloak-tls-es256-v1.p256"
+
+/** Symmetric key for encrypt/decrypt — hsm_sim derives AES-256 key via HKDF from any key_id */
+private const val KEK_ID = "vau-db-kek-v1"
 
 /**
  * End-to-end integration test against hsm_sim.
@@ -135,10 +142,86 @@ class HsmSimIntegrationTest : FunSpec() {
       println("[IT] Public key algorithm: ${grpcPublicKey.algorithm}")
       grpcPublicKey.encoded.toHex() shouldBe certPublicKey.encoded.toHex()
     }
+
+    // ── Encrypt + Decrypt ────────────────────────────────────────────────
+
+    test("Encrypt + Decrypt round-trip via gRPC client returns original plaintext") {
+      val plaintext = "Hello, HSM encryption!".toByteArray()
+      val aad = "row-42".toByteArray()
+
+      val encryptResponse = client.encrypt(KEK_ID, plaintext, aad)
+
+      println(
+          "[IT] Encrypted: ciphertext=${encryptResponse.ciphertext.size()} bytes, iv=${encryptResponse.iv.size()} bytes, tag=${encryptResponse.tag.size()} bytes"
+      )
+      encryptResponse.ciphertext.size() shouldNotBe 0
+      encryptResponse.iv.size() shouldBe 12 // GCM standard IV length
+
+      val decryptResponse =
+          client.decrypt(KEK_ID, encryptResponse.ciphertext.toByteArray(), encryptResponse.iv.toByteArray(), encryptResponse.tag.toByteArray(), aad)
+
+      println("[IT] Decrypted: ${String(decryptResponse.plaintext.toByteArray())}")
+      decryptResponse.plaintext.toByteArray() shouldBe plaintext
+    }
+
+    test("Decrypt with wrong AAD fails (GCM authentication)") {
+      val encryptResponse = client.encrypt(KEK_ID, "secret".toByteArray(), "correct-aad".toByteArray())
+
+      val ex =
+          shouldThrow<io.grpc.StatusRuntimeException> {
+            client.decrypt(
+                KEK_ID,
+                encryptResponse.ciphertext.toByteArray(),
+                encryptResponse.iv.toByteArray(),
+                encryptResponse.tag.toByteArray(),
+                "wrong-aad".toByteArray(),
+            )
+          }
+
+      println("[IT] Expected decrypt failure: ${ex.status}")
+    }
+
+    test("JCA Cipher round-trip via HSMPROXY KeyStore with AES key") {
+      val ks = loadKeyStoreWithAes(hsmEndpoint, KEK_ID)
+      val kek = ks.getKey("kek", null) as SecretKey
+
+      val plaintext = "Sensitive DEK bytes".toByteArray()
+
+      // Encrypt via JCA
+      val encCipher = Cipher.getInstance(HsmProxyProvider.CIPHER_ALGORITHM, provider)
+      encCipher.init(Cipher.ENCRYPT_MODE, kek)
+      encCipher.updateAAD("user-123".toByteArray())
+      val ciphertext = encCipher.doFinal(plaintext)
+      val iv = encCipher.iv
+
+      println("[IT] JCA Encrypt: ciphertext=${ciphertext.size} bytes, iv=${iv.size} bytes")
+      ciphertext.size shouldNotBe 0
+      iv.size shouldBe 12
+
+      // Decrypt via JCA
+      val decCipher = Cipher.getInstance(HsmProxyProvider.CIPHER_ALGORITHM, provider)
+      decCipher.init(Cipher.DECRYPT_MODE, kek, GCMParameterSpec(128, iv))
+      decCipher.updateAAD("user-123".toByteArray())
+      val decrypted = decCipher.doFinal(ciphertext)
+
+      println("[IT] JCA Decrypt: ${String(decrypted)}")
+      decrypted shouldBe plaintext
+    }
   }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+private fun loadKeyStoreWithAes(endpoint: String, kekId: String): KeyStore {
+  val config =
+      """
+    hsm.endpoint=$endpoint
+    keys.kek.key_id=$kekId
+    keys.kek.type=aes
+    """
+          .trimIndent()
+  return KeyStore.getInstance(HsmProxyProvider.KEYSTORE_TYPE).apply { load(config.byteInputStream(), null) }
+}
 
 private fun loadKeyStore(endpoint: String, keyId: String): KeyStore {
   val config =

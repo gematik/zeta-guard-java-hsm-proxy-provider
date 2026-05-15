@@ -35,6 +35,7 @@ import java.security.KeyStoreSpi
 import java.security.cert.Certificate
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
+import java.security.interfaces.ECPublicKey
 import java.util.Collections
 import java.util.Date
 import java.util.Enumeration
@@ -67,7 +68,12 @@ open class HsmKeyStoreSpi : KeyStoreSpi() {
 
   private val log = LoggerFactory.getLogger(HsmKeyStoreSpi::class.java)
 
-  private data class Entry(val keyId: String, val certificate: X509Certificate)
+  internal enum class KeyType {
+    EC,
+    AES,
+  }
+
+  private data class Entry(val keyId: String, val type: KeyType, val certificate: X509Certificate?)
 
   private var entries: Map<String, Entry> = emptyMap()
 
@@ -108,9 +114,16 @@ open class HsmKeyStoreSpi : KeyStoreSpi() {
           configuredKeys.associate { prop ->
             val alias = prop.removePrefix("keys.").removeSuffix(".key_id")
             val keyId = props.getProperty(prop) ?: throw KeyStoreException("Empty key_id for alias '$alias'")
-            val certPath = props.getProperty("keys.$alias.cert")
-            val cert = if (certPath != null) loadCertificateFromFile(alias, certPath) else loadCertificateFromGrpc(alias, keyId)
-            alias to Entry(keyId, cert)
+            val type = parseKeyType(alias, props.getProperty("keys.$alias.type"))
+            val cert =
+                when (type) {
+                  KeyType.AES -> null // symmetric keys have no certificate
+                  KeyType.EC -> {
+                    val certPath = props.getProperty("keys.$alias.cert")
+                    if (certPath != null) loadCertificateFromFile(alias, certPath) else loadCertificateFromGrpc(alias, keyId)
+                  }
+                }
+            alias to Entry(keyId, type, cert)
           }
         } else {
           // Env-var fallback: single entry with alias "tls"
@@ -118,11 +131,21 @@ open class HsmKeyStoreSpi : KeyStoreSpi() {
               readEnv("HSM_PROXY_KEY_ID")
                   ?: throw KeyStoreException("No keys configured: set keys.<alias>.key_id properties or HSM_PROXY_KEY_ID env var")
           val cert = loadCertificateFromGrpc("tls", keyId)
-          mapOf("tls" to Entry(keyId, cert))
+          mapOf("tls" to Entry(keyId, KeyType.EC, cert))
         }
 
     log.info("engineLoad: {} key entries loaded (endpoint={})", entries.size, endpoint)
   }
+
+  private fun parseKeyType(alias: String, value: String?): KeyType =
+      when (value?.lowercase()) {
+        null,
+        "",
+        "ec" -> KeyType.EC
+
+        "aes" -> KeyType.AES
+        else -> throw KeyStoreException("Unknown key type '$value' for alias '$alias' — expected 'ec' or 'aes'")
+      }
 
   /** Overridable factory for the gRPC client. Extracted so tests can inject an in-process channel without modifying the production code path. */
   internal open fun buildGrpcClient(endpoint: String): HsmProxyGrpcClient = HsmProxyGrpcClient(endpoint)
@@ -162,19 +185,25 @@ open class HsmKeyStoreSpi : KeyStoreSpi() {
   // ── Read operations ───────────────────────────────────────────────────────
 
   /**
-   * Returns an [HsmEcPrivateKey] for the given [alias], or `null` if the alias is unknown.
+   * Returns an [HsmEcPrivateKey] (for EC aliases) or [HsmSecretKey] (for AES aliases), or `null` if the alias is unknown.
    *
    * The returned key holds the `key_id` and a reference to the shared [HsmProxyGrpcClient]. No key material is returned.
    */
   override fun engineGetKey(alias: String, password: CharArray?): Key? {
     val entry = entries[alias] ?: return null
     val client = grpcClient ?: throw KeyStoreException("KeyStore not initialised — call KeyStore.load() first")
-    return HsmEcPrivateKey(entry.keyId, client)
+    return when (entry.type) {
+      KeyType.EC -> {
+        val publicKey = entry.certificate?.publicKey as? ECPublicKey ?: throw KeyStoreException("Certificate for alias '$alias' is not EC")
+        HsmEcPrivateKey(entry.keyId, publicKey.params, client)
+      }
+      KeyType.AES -> HsmSecretKey(entry.keyId, client)
+    }
   }
 
   override fun engineGetCertificate(alias: String): Certificate? = entries[alias]?.certificate
 
-  override fun engineGetCertificateChain(alias: String): Array<Certificate>? = entries[alias]?.let { arrayOf(it.certificate) }
+  override fun engineGetCertificateChain(alias: String): Array<Certificate>? = entries[alias]?.certificate?.let { arrayOf(it) }
 
   override fun engineGetCertificateAlias(cert: Certificate): String? = entries.entries.find { it.value.certificate == cert }?.key
 
