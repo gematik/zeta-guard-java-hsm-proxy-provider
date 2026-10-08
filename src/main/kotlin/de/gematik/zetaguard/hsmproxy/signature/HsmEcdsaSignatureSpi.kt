@@ -35,23 +35,19 @@ import java.security.SignatureSpi
 import org.slf4j.LoggerFactory
 
 /**
- * [SignatureSpi] for `SHA256withECDSA` backed by the HSM Proxy.
+ * [SignatureSpi] for `SHA256withECDSA` (ASN.1 DER output) backed by the HSM Proxy. The HSM returns raw IEEE P1363 (R‖S), which this class converts to
+ * DER for legacy callers. For TLS 1.3 (which requires raw P1363 under the `ecdsa_secp256r1_sha256` scheme) use [HsmEcdsaP1363SignatureSpi].
  *
- * Signing flow:
- * 1. [engineInitSign] — accepts an [HsmEcPrivateKey]; no other key type is supported.
- * 2. [engineUpdate] — accumulates data in a [ByteArrayOutputStream].
- * 3. [engineSign] — SHA-256-hashes the accumulated bytes locally, sends the 32-byte digest to the HSM Proxy via gRPC, and converts the IEEE P1363
- *    response (raw R‖S, 64 bytes) to ASN.1 DER.
+ * Signing flow: [engineInitSign] accepts only [HsmEcPrivateKey] · [engineUpdate] accumulates · [engineSign] hashes SHA-256, sends to HSM, formats.
  *
- * Verification is **not** supported. `SHA256withECDSA` verification should be performed with the standard Sun/BC provider using the public key from
- * the certificate — no HSM involvement needed.
+ * Verification is **not** supported — use the standard Sun/BC provider with the public key from the certificate.
  */
-class HsmEcdsaSignatureSpi : SignatureSpi() {
+open class HsmEcdsaSignatureSpi : SignatureSpi() {
 
-  private val log = LoggerFactory.getLogger(HsmEcdsaSignatureSpi::class.java)
+  private val log = LoggerFactory.getLogger(this::class.java)
 
-  private var hsmKey: HsmEcPrivateKey? = null
-  private val buffer = ByteArrayOutputStream()
+  protected var hsmKey: HsmEcPrivateKey? = null
+  protected val buffer: ByteArrayOutputStream = ByteArrayOutputStream()
 
   // ── Init ─────────────────────────────────────────────────────────────────
 
@@ -113,7 +109,7 @@ class HsmEcdsaSignatureSpi : SignatureSpi() {
 
   // ── Helpers ───────────────────────────────────────────────────────────────
 
-  private fun sha256(data: ByteArray): ByteArray = java.security.MessageDigest.getInstance("SHA-256").digest(data)
+  protected fun sha256(data: ByteArray): ByteArray = java.security.MessageDigest.getInstance("SHA-256").digest(data)
 
   /**
    * Converts an IEEE P1363 EC signature (raw R‖S, exactly 64 bytes for P-256) to ASN.1 DER.

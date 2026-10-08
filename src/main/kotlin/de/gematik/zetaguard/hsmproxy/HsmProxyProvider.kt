@@ -27,6 +27,7 @@ package de.gematik.zetaguard.hsmproxy
 import de.gematik.zetaguard.hsmproxy.cipher.HsmAesGcmCipherSpi
 import de.gematik.zetaguard.hsmproxy.keystore.HsmEcPrivateKey
 import de.gematik.zetaguard.hsmproxy.keystore.HsmKeyStoreSpi
+import de.gematik.zetaguard.hsmproxy.signature.HsmEcdsaP1363SignatureSpi
 import de.gematik.zetaguard.hsmproxy.signature.HsmEcdsaSignatureSpi
 import java.security.Provider
 
@@ -37,7 +38,9 @@ import java.security.Provider
  * - `KeyStore.HSMPROXY` — backed by [HsmKeyStoreSpi]: loads key references and certificates from a `.properties` stream; private key operations are
  *   forwarded to the HSM Proxy via gRPC.
  * - `Signature.SHA256withECDSA` — backed by [HsmEcdsaSignatureSpi]: hashes data locally, sends the digest to the HSM Proxy for signing, and converts
- *   the returned IEEE P1363 signature to ASN.1 DER.
+ *   the returned IEEE P1363 signature to ASN.1 DER (legacy TLS 1.2 / JWS callers).
+ * - `Signature.SHA256withECDSAinP1363Format` — backed by [HsmEcdsaP1363SignatureSpi]: same flow but returns raw 64-byte R‖S, required by the JDK's
+ *   TLS 1.3 `ecdsa_secp256r1_sha256` SignatureScheme. Without it TLS 1.3 handshakes silently fail.
  * - `Cipher.AES/GCM/NoPadding` — backed by [HsmAesGcmCipherSpi]: delegates AES-256-GCM encrypt/decrypt to the HSM Proxy via gRPC.
  *
  * ## Programmatic registration (recommended)
@@ -74,17 +77,9 @@ class HsmProxyProvider : Provider(NAME, "1.0", "gematik HSM Proxy Java Security 
   }
 
   init {
-    putService(
-        object :
-            Service(
-                this,
-                "Signature",
-                "SHA256withECDSA",
-                HsmEcdsaSignatureSpi::class.java.name,
-                /* aliases */ null,
-                /* attrs   */ mapOf("SupportedKeyClasses" to HsmEcPrivateKey::class.java.name),
-            ) {}
-    )
+    val sigAttrs = mapOf("SupportedKeyClasses" to HsmEcPrivateKey::class.java.name)
+    putService(object : Service(this, "Signature", "SHA256withECDSA", HsmEcdsaSignatureSpi::class.java.name, null, sigAttrs) {})
+    putService(object : Service(this, "Signature", "SHA256withECDSAinP1363Format", HsmEcdsaP1363SignatureSpi::class.java.name, null, sigAttrs) {})
     putService(object : Service(this, "KeyStore", "HSMPROXY", HsmKeyStoreSpi::class.java.name, null, null) {})
     putService(object : Service(this, "Cipher", "AES/GCM/NoPadding", HsmAesGcmCipherSpi::class.java.name, null, null) {})
   }
