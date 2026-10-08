@@ -26,7 +26,9 @@ package de.gematik.zetaguard.hsmproxy.keystore
 
 import de.gematik.zetaguard.hsmproxy.grpc.HsmProxyGrpcClient
 import java.math.BigInteger
+import java.security.KeyPairGenerator
 import java.security.interfaces.ECPrivateKey
+import java.security.spec.ECGenParameterSpec
 import java.security.spec.ECParameterSpec
 
 /**
@@ -36,7 +38,7 @@ import java.security.spec.ECParameterSpec
  * Implements [ECPrivateKey] so JCE consumers can introspect the curve via [getParams] and so [HsmProxyProvider] can advertise
  * `SupportedKeyClasses=HsmEcPrivateKey` to enable provider auto-resolution from `Signature.getInstance("SHA256withECDSA")` without an explicit
  * provider argument.
- * - [getEncoded] returns `null` (no local key material).
+ * - [getEncoded] returns a throwaway PKCS#8 placeholder — see method KDoc.
  * - [getFormat] returns `"PKCS#8"` — required because some JDK internals (e.g. PKCS12KeyStore) call `getFormat().equals(...)` without null-checking.
  * - [getS] always throws — the private scalar never leaves the HSM.
  */
@@ -45,8 +47,12 @@ class HsmEcPrivateKey internal constructor(val keyId: String, private val ecPara
 
   override fun getAlgorithm(): String = "EC"
 
-  /** Returns `null` — key material never leaves the HSM. */
-  override fun getEncoded(): ByteArray? = null
+  /**
+   * Returns a throwaway P-256 PKCS#8 — **not** the HSM key. Required because Vert.x `KeyStoreHelper`'s SNI re-pack calls JDK PKCS12
+   * `encryptPrivateKey(getEncoded(), …)`, which throws `Null input buffer` on `null`. The placeholder feeds the SNI per-domain map (never consulted
+   * when SNI is off); the real HSM key is resolved via the main `KeyManagerFactory.init(hsmStore, …)` path.
+   */
+  override fun getEncoded(): ByteArray = PLACEHOLDER_PKCS8_BYTES
 
   /** Returns `"PKCS#8"` — standard private key format identifier, required by JDK KeyStore internals even though [getEncoded] returns `null`. */
   override fun getFormat(): String = "PKCS#8"
@@ -59,5 +65,12 @@ class HsmEcPrivateKey internal constructor(val keyId: String, private val ecPara
   /** Always throws — the private scalar stays in the HSM. */
   override fun getS(): BigInteger {
     throw UnsupportedOperationException("Private scalar stays in the HSM")
+  }
+
+  companion object {
+    // Pin SunEC: BC's EC PKCS#8 carries optional fields that SUN PKCS12's getKey ASN.1 decoder rejects with "extra data at the end".
+    private val PLACEHOLDER_PKCS8_BYTES: ByteArray by lazy {
+      KeyPairGenerator.getInstance("EC", "SunEC").apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair().private.encoded
+    }
   }
 }

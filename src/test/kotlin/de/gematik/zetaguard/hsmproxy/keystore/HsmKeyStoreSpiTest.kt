@@ -257,10 +257,10 @@ class HsmKeyStoreSpiTest : FunSpec() {
       key.getAlgorithm() shouldBe "EC"
     }
 
-    test("engineGetKey returned key has no encoded material") {
+    test("engineGetKey returned EC key has a placeholder PKCS#8 (not the HSM key)") {
       val spi = loadSpi(config())
       val key = spi.engineGetKey("tls-key", null) as HsmEcPrivateKey
-      key.getEncoded().shouldBeNull()
+      key.getEncoded().shouldNotBeNull()
     }
 
     test("engineGetKey returned EC key carries curve params from the certificate (P-256)") {

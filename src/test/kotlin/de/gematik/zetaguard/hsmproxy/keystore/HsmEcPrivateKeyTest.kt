@@ -27,10 +27,14 @@ package de.gematik.zetaguard.hsmproxy.keystore
 import de.gematik.zetaguard.hsmproxy.grpc.HsmProxyGrpcClient
 import io.grpc.inprocess.InProcessChannelBuilder
 import io.kotest.core.spec.style.FunSpec
+import io.kotest.matchers.collections.shouldNotBeEmpty
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeInstanceOf
 import io.mockk.mockk
+import java.security.KeyFactory
 import java.security.PrivateKey
+import java.security.interfaces.ECPrivateKey as JdkECPrivateKey
+import java.security.spec.PKCS8EncodedKeySpec
 
 class HsmEcPrivateKeyTest :
     FunSpec({
@@ -42,7 +46,17 @@ class HsmEcPrivateKeyTest :
 
       test("getAlgorithm returns EC") { HsmEcPrivateKey("any-key-id", mockk(), client).getAlgorithm() shouldBe "EC" }
 
-      test("getEncoded returns null — no key material stored locally") { HsmEcPrivateKey("any-key-id", mockk(), client).getEncoded() shouldBe null }
+      test("getEncoded returns a placeholder PKCS#8 that round-trips through KeyFactory") {
+        val bytes = HsmEcPrivateKey("any-key-id", mockk(), client).encoded
+        bytes.toList().shouldNotBeEmpty()
+        KeyFactory.getInstance("EC").generatePrivate(PKCS8EncodedKeySpec(bytes)).shouldBeInstanceOf<JdkECPrivateKey>()
+      }
+
+      test("getEncoded is the same bytes across instances (one throwaway keypair per JVM)") {
+        val a = HsmEcPrivateKey("a", mockk(), client).encoded
+        val b = HsmEcPrivateKey("b", mockk(), client).encoded
+        a.contentEquals(b) shouldBe true
+      }
 
       test("getFormat returns PKCS#8 — required by JDK KeyStore internals") {
         HsmEcPrivateKey("any-key-id", mockk(), client).getFormat() shouldBe "PKCS#8"

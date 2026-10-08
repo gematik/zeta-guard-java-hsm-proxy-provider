@@ -247,6 +247,36 @@ class HsmEcdsaSignatureSpiTest : FunSpec() {
       (der[0].toInt() and 0xFF) shouldBe 0x30 // SEQUENCE tag
       (der[2].toInt() and 0xFF) shouldBe 0x02 // first INTEGER tag
     }
+
+    // ── SHA256withECDSAinP1363Format (TLS 1.3) ────────────────────────────
+
+    test("SHA256withECDSAinP1363Format is registered and returns raw R‖S (no DER wrapping)") {
+      // r=1, s=2 padded to 32 bytes each
+      val p1363 =
+          ByteArray(64).also {
+            it[31] = 0x01
+            it[63] = 0x02
+          }
+      fakeService.nextSignature = p1363
+
+      val sig = Signature.getInstance("SHA256withECDSAinP1363Format", provider)
+      sig.initSign(hsmKey)
+      val out = sig.sign()
+
+      out shouldBe p1363 // pass-through, no DER conversion
+    }
+
+    test("SHA256withECDSAinP1363Format wraps gRPC error in SignatureException") {
+      fakeService.signError = Status.UNAVAILABLE.withDescription("HSM proxy down").asRuntimeException()
+
+      val sig = Signature.getInstance("SHA256withECDSAinP1363Format", provider)
+      sig.initSign(hsmKey)
+
+      val ex = shouldThrow<SignatureException> { sig.sign() }
+      ex.message shouldContain "HSM Proxy signing failed"
+
+      fakeService.signError = null
+    }
   }
 }
 
